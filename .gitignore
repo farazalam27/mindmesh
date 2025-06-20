@@ -253,6 +253,30 @@ mindmesh.egg-info/
 start_services.py
 nohup.out
 
+# Security - Secrets and credentials
+*.pem
+*.key
+*.crt
+*.p12
+*.jks
+*.keystore
+*secret*
+*Secret*
+*SECRET*
+secrets.yaml
+secrets.yml
+.env
+.env.*
+!.env.example
+config.json
+credentials.json
+auth.json
+
+# Database dumps and backups
+*.sql
+*.dump
+*.backup
+
 # Claude AI files
 CLAUDE.md
 .claude/

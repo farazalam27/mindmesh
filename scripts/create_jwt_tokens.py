@@ -6,7 +6,8 @@ from datetime import datetime, timedelta
 import json
 
 # JWT Configuration (matching the services)
-SECRET_KEY = "your-super-secret-key-here-for-development"
+import os
+SECRET_KEY = os.getenv("JWT_SECRET_KEY", "development-key-change-in-production")
 ALGORITHM = "HS256"
 
 def create_token(user_data, expires_in_minutes=60):

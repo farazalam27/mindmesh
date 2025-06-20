@@ -5,9 +5,9 @@ services:
     image: postgres:15-alpine
     container_name: mindmesh-postgres
     environment:
-      POSTGRES_USER: mindmesh
-      POSTGRES_PASSWORD: mindmesh123
-      POSTGRES_DB: mindmesh
+      POSTGRES_USER: ${POSTGRES_USER:-mindmesh}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-please_change_me}
+      POSTGRES_DB: ${POSTGRES_DB:-mindmesh}
     ports:
       - "5433:5432"
     volumes:
