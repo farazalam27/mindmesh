@@ -1,0 +1,190 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: mindmesh-postgres
+    environment:
+      POSTGRES_USER: mindmesh
+      POSTGRES_PASSWORD: mindmesh123
+      POSTGRES_DB: mindmesh
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mindmesh"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: mindmesh-redis
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api-gateway:
+    build:
+      context: .
+      dockerfile: services/api_gateway/Dockerfile
+    container_name: mindmesh-api-gateway
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://mindmesh:mindmesh123@postgres:5432/mindmesh
+      - REDIS_URL=redis://redis:6379
+      - SERVICE_NAME=api-gateway
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./services/api_gateway:/app/services/api_gateway
+      - ./core:/app/core
+    command: uvicorn services.api_gateway.main:app --host 0.0.0.0 --port 8000 --reload
+
+  data-processor:
+    build:
+      context: .
+      dockerfile: services/data_processor/Dockerfile
+    container_name: mindmesh-data-processor
+    environment:
+      - DATABASE_URL=postgresql://mindmesh:mindmesh123@postgres:5432/mindmesh
+      - REDIS_URL=redis://redis:6379
+      - SERVICE_NAME=data-processor
+      - SPARK_MASTER_URL=spark://spark-master:7077
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./services/data_processor:/app/services/data_processor
+      - ./core:/app/core
+      - ./data:/app/data
+    command: uvicorn services.data_processor.main:app --host 0.0.0.0 --port 8001 --reload
+
+  model-registry:
+    build:
+      context: .
+      dockerfile: services/model_registry/Dockerfile
+    container_name: mindmesh-model-registry
+    environment:
+      - DATABASE_URL=postgresql://mindmesh:mindmesh123@postgres:5432/mindmesh
+      - REDIS_URL=redis://redis:6379
+      - SERVICE_NAME=model-registry
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./services/model_registry:/app/services/model_registry
+      - ./core:/app/core
+      - ./models:/app/models
+    command: uvicorn services.model_registry.main:app --host 0.0.0.0 --port 8002 --reload
+
+  workflow-orchestrator:
+    build:
+      context: .
+      dockerfile: services/workflow_orchestrator/Dockerfile
+    container_name: mindmesh-workflow-orchestrator
+    environment:
+      - DATABASE_URL=postgresql://mindmesh:mindmesh123@postgres:5432/mindmesh
+      - REDIS_URL=redis://redis:6379
+      - SERVICE_NAME=workflow-orchestrator
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./services/workflow_orchestrator:/app/services/workflow_orchestrator
+      - ./core:/app/core
+    command: uvicorn services.workflow_orchestrator.main:app --host 0.0.0.0 --port 8003 --reload
+
+  celery-worker:
+    build:
+      context: .
+      dockerfile: services/workflow_orchestrator/Dockerfile
+    container_name: mindmesh-celery-worker
+    environment:
+      - DATABASE_URL=postgresql://mindmesh:mindmesh123@postgres:5432/mindmesh
+      - REDIS_URL=redis://redis:6379
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./services/workflow_orchestrator:/app/services/workflow_orchestrator
+      - ./core:/app/core
+    command: celery -A services.workflow_orchestrator.tasks worker --loglevel=info
+
+  celery-beat:
+    build:
+      context: .
+      dockerfile: services/workflow_orchestrator/Dockerfile
+    container_name: mindmesh-celery-beat
+    environment:
+      - DATABASE_URL=postgresql://mindmesh:mindmesh123@postgres:5432/mindmesh
+      - REDIS_URL=redis://redis:6379
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./services/workflow_orchestrator:/app/services/workflow_orchestrator
+      - ./core:/app/core
+    command: celery -A services.workflow_orchestrator.tasks beat --loglevel=info
+
+  spark-master:
+    image: bitnami/spark:3.5
+    container_name: mindmesh-spark-master
+    environment:
+      - SPARK_MODE=master
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+    volumes:
+      - spark_data:/bitnami/spark
+
+  spark-worker:
+    image: bitnami/spark:3.5
+    container_name: mindmesh-spark-worker
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
+      - SPARK_WORKER_MEMORY=2G
+      - SPARK_WORKER_CORES=2
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+    depends_on:
+      - spark-master
+    volumes:
+      - spark_data:/bitnami/spark
+
+volumes:
+  postgres_data:
+  redis_data:
+  spark_data:

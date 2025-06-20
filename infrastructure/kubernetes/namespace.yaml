@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mindmesh
+  labels:
+    name: mindmesh
+    version: v1
+    environment: production
+spec: {}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mindmesh-staging
+  labels:
+    name: mindmesh-staging
+    version: v1
+    environment: staging
+spec: {}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mindmesh-monitoring
+  labels:
+    name: mindmesh-monitoring
+    purpose: monitoring
+spec: {}

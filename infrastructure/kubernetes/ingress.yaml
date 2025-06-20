@@ -1,0 +1,237 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mindmesh-ingress
+  namespace: mindmesh
+  labels:
+    app: mindmesh
+    version: v1
+  annotations:
+    # NGINX Ingress Controller annotations
+    kubernetes.io/ingress.class: "nginx"
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    
+    # Rate limiting
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+    nginx.ingress.kubernetes.io/rate-limit-window: "1m"
+    
+    # CORS
+    nginx.ingress.kubernetes.io/enable-cors: "true"
+    nginx.ingress.kubernetes.io/cors-allow-origin: "https://mindmesh.com,https://www.mindmesh.com"
+    nginx.ingress.kubernetes.io/cors-allow-methods: "GET, POST, PUT, DELETE, OPTIONS"
+    nginx.ingress.kubernetes.io/cors-allow-headers: "DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization"
+    
+    # Load balancing
+    nginx.ingress.kubernetes.io/upstream-hash-by: "$remote_addr"
+    nginx.ingress.kubernetes.io/load-balance: "least_conn"
+    
+    # Security headers
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      add_header X-Frame-Options "SAMEORIGIN" always;
+      add_header X-Content-Type-Options "nosniff" always;
+      add_header X-XSS-Protection "1; mode=block" always;
+      add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+      add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline';" always;
+      
+    # Connection limits
+    nginx.ingress.kubernetes.io/limit-connections: "10"
+    nginx.ingress.kubernetes.io/limit-rps: "5"
+    
+    # Timeouts
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "30"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "30"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "30"
+    
+    # Buffering
+    nginx.ingress.kubernetes.io/proxy-buffering: "on"
+    nginx.ingress.kubernetes.io/proxy-buffer-size: "8k"
+    
+    # Cert-manager annotations for automatic SSL
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    
+spec:
+  tls:
+  - hosts:
+    - mindmesh.com
+    - www.mindmesh.com
+    - api.mindmesh.com
+    secretName: mindmesh-tls-secret
+  rules:
+  - host: mindmesh.com
+    http:
+      paths:
+      - path: /api/ideas
+        pathType: Prefix
+        backend:
+          service:
+            name: ideas-service
+            port:
+              number: 3001
+      - path: /api/voting
+        pathType: Prefix
+        backend:
+          service:
+            name: voting-service
+            port:
+              number: 3002
+      - path: /api/analytics
+        pathType: Prefix
+        backend:
+          service:
+            name: analytics-service
+            port:
+              number: 3003
+      - path: /api/decisions
+        pathType: Prefix
+        backend:
+          service:
+            name: decision-service
+            port:
+              number: 3004
+      - path: /health
+        pathType: Exact
+        backend:
+          service:
+            name: ideas-service
+            port:
+              number: 3001
+  - host: www.mindmesh.com
+    http:
+      paths:
+      - path: /api/ideas
+        pathType: Prefix
+        backend:
+          service:
+            name: ideas-service
+            port:
+              number: 3001
+      - path: /api/voting
+        pathType: Prefix
+        backend:
+          service:
+            name: voting-service
+            port:
+              number: 3002
+      - path: /api/analytics
+        pathType: Prefix
+        backend:
+          service:
+            name: analytics-service
+            port:
+              number: 3003
+      - path: /api/decisions
+        pathType: Prefix
+        backend:
+          service:
+            name: decision-service
+            port:
+              number: 3004
+  - host: api.mindmesh.com
+    http:
+      paths:
+      - path: /ideas
+        pathType: Prefix
+        backend:
+          service:
+            name: ideas-service
+            port:
+              number: 3001
+      - path: /voting
+        pathType: Prefix
+        backend:
+          service:
+            name: voting-service
+            port:
+              number: 3002
+      - path: /analytics
+        pathType: Prefix
+        backend:
+          service:
+            name: analytics-service
+            port:
+              number: 3003
+      - path: /decisions
+        pathType: Prefix
+        backend:
+          service:
+            name: decision-service
+            port:
+              number: 3004
+
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: admin@mindmesh.com
+    privateKeySecretRef:
+      name: letsencrypt-prod
+    solvers:
+    - http01:
+        ingress:
+          class: nginx
+
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-staging
+spec:
+  acme:
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    email: admin@mindmesh.com
+    privateKeySecretRef:
+      name: letsencrypt-staging
+    solvers:
+    - http01:
+        ingress:
+          class: nginx
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mindmesh-network-policy
+  namespace: mindmesh
+spec:
+  podSelector:
+    matchLabels:
+      tier: backend
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: mindmesh
+    ports:
+    - protocol: TCP
+      port: 3001
+    - protocol: TCP
+      port: 3002
+    - protocol: TCP
+      port: 3003
+    - protocol: TCP
+      port: 3004
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: mindmesh
+    ports:
+    - protocol: TCP
+      port: 5432
+    - protocol: TCP
+      port: 6379
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 443
+    - protocol: TCP
+      port: 80

@@ -1,0 +1,1 @@
+"""Analytics microservice for MindMesh platform."""

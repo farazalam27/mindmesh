@@ -1,0 +1,1 @@
+"""Voting microservice for MindMesh platform."""

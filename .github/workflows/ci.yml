@@ -1,0 +1,359 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  NODE_VERSION: '18'
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      services: ${{ steps.services.outputs.services }}
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Generate version
+        id: version
+        run: |
+          if [[ ${{ github.ref }} == 'refs/heads/main' ]]; then
+            VERSION=${{ github.run_number }}-${GITHUB_SHA::7}
+          else
+            VERSION=${{ github.run_number }}-${GITHUB_SHA::7}-dev
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          
+      - name: Set services matrix
+        id: services
+        run: |
+          echo "services=[\"ideas\", \"voting\", \"analytics\", \"decision\"]" >> $GITHUB_OUTPUT
+
+  lint-and-test:
+    runs-on: ubuntu-latest
+    needs: setup
+    strategy:
+      matrix:
+        service: ${{ fromJson(needs.setup.outputs.services) }}
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: backend/${{ matrix.service }}-service/package-lock.json
+          
+      - name: Install dependencies
+        run: |
+          cd backend/${{ matrix.service }}-service
+          npm ci
+          
+      - name: Run linting
+        run: |
+          cd backend/${{ matrix.service }}-service
+          npm run lint || true
+          
+      - name: Run tests
+        run: |
+          cd backend/${{ matrix.service }}-service
+          npm test -- --coverage --ci --watchAll=false
+          
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          file: backend/${{ matrix.service }}-service/coverage/lcov.info
+          flags: ${{ matrix.service }}-service
+          name: ${{ matrix.service }}-service-coverage
+
+  security-scan:
+    runs-on: ubuntu-latest
+    needs: setup
+    strategy:
+      matrix:
+        service: ${{ fromJson(needs.setup.outputs.services) }}
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: backend/${{ matrix.service }}-service/package-lock.json
+          
+      - name: Install dependencies
+        run: |
+          cd backend/${{ matrix.service }}-service
+          npm ci
+          
+      - name: Run security audit
+        run: |
+          cd backend/${{ matrix.service }}-service
+          npm audit --audit-level moderate
+          
+      - name: Run Snyk security scan
+        uses: snyk/actions/node@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --severity-threshold=medium
+          command: test
+          
+  sonarcloud:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+    needs: [lint-and-test]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          
+      - name: SonarCloud Scan
+        uses: SonarSource/sonarcloud-github-action@master
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+  build-and-push:
+    runs-on: ubuntu-latest
+    needs: [setup, lint-and-test, security-scan]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+    strategy:
+      matrix:
+        service: ${{ fromJson(needs.setup.outputs.services) }}
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.service }}-service
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=raw,value=${{ needs.setup.outputs.version }}
+            type=raw,value=latest,enable={{is_default_branch}}
+            
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: infrastructure/docker/Dockerfile.${{ matrix.service }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64,linux/arm64
+          
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.service }}-service:${{ needs.setup.outputs.version }}
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+  deploy-staging:
+    runs-on: ubuntu-latest
+    needs: [setup, build-and-push]
+    if: github.ref == 'refs/heads/develop'
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+          
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig --region us-east-1 --name mindmesh-staging
+          
+      - name: Deploy to staging
+        run: |
+          # Replace image tags in deployment files
+          sed -i "s|image: mindmesh/ideas-service:latest|image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/ideas-service:${{ needs.setup.outputs.version }}|g" infrastructure/kubernetes/ideas-service.yaml
+          sed -i "s|image: mindmesh/voting-service:latest|image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/voting-service:${{ needs.setup.outputs.version }}|g" infrastructure/kubernetes/voting-service.yaml
+          sed -i "s|image: mindmesh/analytics-service:latest|image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/analytics-service:${{ needs.setup.outputs.version }}|g" infrastructure/kubernetes/analytics-service.yaml
+          sed -i "s|image: mindmesh/decision-service:latest|image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/decision-service:${{ needs.setup.outputs.version }}|g" infrastructure/kubernetes/decision-service.yaml
+          
+          # Apply configurations
+          kubectl apply -f infrastructure/kubernetes/namespace.yaml
+          kubectl apply -f infrastructure/kubernetes/configmap.yaml -n mindmesh-staging
+          kubectl apply -f infrastructure/kubernetes/secrets.yaml -n mindmesh-staging
+          kubectl apply -f infrastructure/kubernetes/postgresql.yaml -n mindmesh-staging
+          kubectl apply -f infrastructure/kubernetes/redis.yaml -n mindmesh-staging
+          kubectl apply -f infrastructure/kubernetes/ideas-service.yaml -n mindmesh-staging
+          kubectl apply -f infrastructure/kubernetes/voting-service.yaml -n mindmesh-staging
+          kubectl apply -f infrastructure/kubernetes/analytics-service.yaml -n mindmesh-staging
+          kubectl apply -f infrastructure/kubernetes/decision-service.yaml -n mindmesh-staging
+          kubectl apply -f infrastructure/kubernetes/ingress.yaml -n mindmesh-staging
+          kubectl apply -f infrastructure/kubernetes/hpa.yaml -n mindmesh-staging
+          
+          # Wait for rollout
+          kubectl rollout status deployment/ideas-service -n mindmesh-staging --timeout=300s
+          kubectl rollout status deployment/voting-service -n mindmesh-staging --timeout=300s
+          kubectl rollout status deployment/analytics-service -n mindmesh-staging --timeout=300s
+          kubectl rollout status deployment/decision-service -n mindmesh-staging --timeout=300s
+
+  integration-tests:
+    runs-on: ubuntu-latest
+    needs: [deploy-staging]
+    if: github.ref == 'refs/heads/develop'
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          
+      - name: Run integration tests
+        run: |
+          cd tests/integration
+          npm ci
+          npm run test:staging
+        env:
+          STAGING_URL: https://staging.mindmesh.com
+          API_KEY: ${{ secrets.STAGING_API_KEY }}
+
+  deploy-production:
+    runs-on: ubuntu-latest
+    needs: [setup, build-and-push]
+    if: github.ref == 'refs/heads/main'
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+          
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig --region us-east-1 --name mindmesh-production
+          
+      - name: Deploy to production
+        run: |
+          # Replace image tags in deployment files
+          sed -i "s|image: mindmesh/ideas-service:latest|image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/ideas-service:${{ needs.setup.outputs.version }}|g" infrastructure/kubernetes/ideas-service.yaml
+          sed -i "s|image: mindmesh/voting-service:latest|image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/voting-service:${{ needs.setup.outputs.version }}|g" infrastructure/kubernetes/voting-service.yaml
+          sed -i "s|image: mindmesh/analytics-service:latest|image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/analytics-service:${{ needs.setup.outputs.version }}|g" infrastructure/kubernetes/analytics-service.yaml
+          sed -i "s|image: mindmesh/decision-service:latest|image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/decision-service:${{ needs.setup.outputs.version }}|g" infrastructure/kubernetes/decision-service.yaml
+          
+          # Apply configurations
+          kubectl apply -f infrastructure/kubernetes/namespace.yaml
+          kubectl apply -f infrastructure/kubernetes/configmap.yaml -n mindmesh
+          kubectl apply -f infrastructure/kubernetes/secrets.yaml -n mindmesh
+          kubectl apply -f infrastructure/kubernetes/postgresql.yaml -n mindmesh
+          kubectl apply -f infrastructure/kubernetes/redis.yaml -n mindmesh
+          kubectl apply -f infrastructure/kubernetes/ideas-service.yaml -n mindmesh
+          kubectl apply -f infrastructure/kubernetes/voting-service.yaml -n mindmesh
+          kubectl apply -f infrastructure/kubernetes/analytics-service.yaml -n mindmesh
+          kubectl apply -f infrastructure/kubernetes/decision-service.yaml -n mindmesh
+          kubectl apply -f infrastructure/kubernetes/ingress.yaml -n mindmesh
+          kubectl apply -f infrastructure/kubernetes/hpa.yaml -n mindmesh
+          
+          # Wait for rollout
+          kubectl rollout status deployment/ideas-service -n mindmesh --timeout=300s
+          kubectl rollout status deployment/voting-service -n mindmesh --timeout=300s
+          kubectl rollout status deployment/analytics-service -n mindmesh --timeout=300s
+          kubectl rollout status deployment/decision-service -n mindmesh --timeout=300s
+
+  e2e-tests:
+    runs-on: ubuntu-latest
+    needs: [deploy-production]
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          
+      - name: Run E2E tests
+        run: |
+          cd tests/e2e
+          npm ci
+          npm run test:production
+        env:
+          PRODUCTION_URL: https://mindmesh.com
+          API_KEY: ${{ secrets.PRODUCTION_API_KEY }}
+
+  performance-tests:
+    runs-on: ubuntu-latest
+    needs: [deploy-production]
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          
+      - name: Run performance tests
+        run: |
+          cd tests/performance
+          npm ci
+          npm run test:production
+        env:
+          PRODUCTION_URL: https://mindmesh.com
+          API_KEY: ${{ secrets.PRODUCTION_API_KEY }}
+
+  notify:
+    runs-on: ubuntu-latest
+    needs: [deploy-production, e2e-tests, performance-tests]
+    if: always()
+    steps:
+      - name: Notify Slack
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          channel: '#deployments'
+          text: |
+            MindMesh Deployment ${{ job.status }}!
+            
+            Branch: ${{ github.ref_name }}
+            Version: ${{ needs.setup.outputs.version }}
+            Commit: ${{ github.sha }}
+            
+            Services deployed:
+            • Ideas Service
+            • Voting Service
+            • Analytics Service
+            • Decision Service
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}

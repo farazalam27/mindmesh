@@ -1,0 +1,67 @@
+# Multi-stage build for Ideas Service
+FROM node:18-alpine AS builder
+
+# Set working directory
+WORKDIR /app
+
+# Copy package files
+COPY backend/ideas-service/package*.json ./
+
+# Install dependencies (including dev dependencies for build)
+RUN npm ci --only=production --silent
+
+# Copy source code
+COPY backend/ideas-service/ .
+
+# Build the application (if using TypeScript or need build step)
+RUN npm run build 2>/dev/null || echo "No build script found"
+
+# Production stage
+FROM node:18-alpine AS production
+
+# Create app user for security
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S appuser -u 1001 -G nodejs
+
+# Set working directory
+WORKDIR /app
+
+# Copy package files
+COPY backend/ideas-service/package*.json ./
+
+# Install only production dependencies
+RUN npm ci --only=production --silent && \
+    npm cache clean --force
+
+# Copy built application from builder stage
+COPY --from=builder --chown=appuser:nodejs /app/dist ./dist 2>/dev/null || \
+COPY --from=builder --chown=appuser:nodejs /app/src ./src
+
+# Copy other necessary files
+COPY --chown=appuser:nodejs backend/ideas-service/*.js* ./
+COPY --chown=appuser:nodejs backend/ideas-service/config ./config 2>/dev/null || echo "No config directory"
+
+# Create necessary directories
+RUN mkdir -p /app/logs /app/tmp && \
+    chown -R appuser:nodejs /app/logs /app/tmp
+
+# Install security updates
+RUN apk update && apk upgrade && \
+    apk add --no-cache dumb-init && \
+    rm -rf /var/cache/apk/*
+
+# Switch to non-root user
+USER appuser
+
+# Expose port
+EXPOSE 3001
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD node -e "require('http').get('http://localhost:3001/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) })" || exit 1
+
+# Use dumb-init to handle signals properly
+ENTRYPOINT ["dumb-init", "--"]
+
+# Start the application
+CMD ["node", "src/index.js"]
