@@ -3,6 +3,230 @@
 ## Overview
 This file provides context for developing the MindMesh frontend in a separate repository. The frontend will be a modern TypeScript React application using Next.js 14.
 
+## Backend Architecture Deep Dive
+
+### System Overview
+MindMesh backend is a microservices architecture with 4 main services:
+1. **Ideas Service** (Port 8001) - Core idea management
+2. **Voting Service** (Port 8002) - Real-time voting with Redis caching
+3. **Decision Service** (Port 8003) - Decision tracking with event sourcing
+4. **Analytics Service** (Foundation) - PySpark-based analytics (not fully implemented)
+
+### Infrastructure Stack
+- **Language**: Python 3.11
+- **Framework**: FastAPI with async/await
+- **Database**: PostgreSQL 15 (port 5433 in development)
+- **Cache**: Redis 7 (port 6380 in development)  
+- **Authentication**: JWT with role-based access
+- **Container**: Docker & Docker Compose
+- **Deployment**: Kubernetes (AWS EKS configurations included)
+
+### Database Architecture
+
+#### Ideas Service Database (PostgreSQL)
+**Tables:**
+- `ideas` - Core idea storage
+  - id (PK), title, description, category, tags[], status, user_id, user_email, user_name
+  - vote_count, average_rating, view_count, created_at, updated_at, published_at
+- `comments` - User comments on ideas
+  - id (PK), idea_id (FK), content, user_id, user_email, user_name, created_at
+
+**Categories**: innovation, improvement, problem_solving, cost_saving, revenue_generation, other
+**Statuses**: draft, active, implemented, rejected
+
+#### Voting Service Database (PostgreSQL + Redis)
+**PostgreSQL Tables:**
+- `votes` - Individual vote records
+  - id (PK), idea_id, user_id, vote_type (upvote/downvote), rating (1-5), created_at
+- `vote_aggregates` - Cached voting statistics
+  - idea_id (PK), upvote_count, downvote_count, total_votes, rating_count, average_rating, score, last_updated
+
+**Redis Usage:**
+- Rate limiting for votes (prevents spam)
+- Real-time vote caching
+- Session storage
+
+#### Decision Service Database (PostgreSQL)
+**Tables:**
+- `decisions` - Core decision records
+  - id (PK), decision_id (UUID), idea_id, decision_type, status, summary, rationale
+  - conditions[], decided_by, decision_committee[], timeline_days
+  - created_at, decided_at, implemented_at
+- `decision_events` - Event sourcing for audit trails
+  - id (PK), event_id (UUID), decision_id (FK), event_type, actor_id, occurred_at
+- `decision_criteria` - Automated decision rules (not fully implemented)
+- `decision_templates` - Reusable decision formats (not fully implemented)
+
+**Decision Types**: implementation, rejection, modification, escalation, deferral
+**Statuses**: pending, in_review, approved, rejected, implemented, on_hold
+
+### Backend Service Details
+
+#### Ideas Service (Port 8001)
+**File Structure:**
+- `main.py` - FastAPI app with lifespan management
+- `api.py` - Router with JWT auth middleware
+- `models.py` - SQLAlchemy models (Idea, Comment, IdeaStatus enum)
+- `schemas.py` - Pydantic models for request/response validation
+- `database.py` - Database session management and initialization
+
+**Key Features:**
+- Automatic database table creation on startup
+- JWT authentication with role-based access
+- Pagination and filtering for idea lists
+- Full CRUD operations with proper validation
+- User information embedded in responses (no separate user service)
+
+#### Voting Service (Port 8002)
+**File Structure:**
+- `main.py` - FastAPI app with Redis health checks
+- `api.py` - Voting endpoints with rate limiting
+- `models.py` - Vote and VoteAggregate models
+- `schemas.py` - Vote validation schemas
+- `redis_client.py` - Redis connection and operations
+
+**Key Features:**
+- Rate limiting per user using Redis
+- Real-time vote aggregation
+- Prevents duplicate voting (one vote per user per idea)
+- Redis caching for performance
+- Vote statistics and analytics endpoints
+
+#### Decision Service (Port 8003)
+**File Structure:**
+- `main.py` - FastAPI app with analytics integration attempts
+- `api.py` - Decision CRUD with role-based permissions
+- `models.py` - Decision, DecisionEvent, DecisionCriteria models
+- `schemas.py` - Complex decision validation schemas
+- `events.py` - Event sourcing for decision audit trails
+
+**Key Features:**
+- Event sourcing for complete audit trails
+- Role-based permissions (decision_maker role required)
+- Integration attempts with analytics service (returns 404)
+- Complex decision workflows with conditions and timelines
+- Automatic event logging for all decision changes
+
+### Backend Security Implementation
+
+#### JWT Authentication Details
+**Token Structure:**
+```json
+{
+  "user_id": "string",
+  "email": "email@domain.com", 
+  "name": "Full Name",
+  "roles": ["role1", "role2"],
+  "exp": 1234567890
+}
+```
+
+**Security Features:**
+- Bearer token authentication on all protected endpoints
+- Role-based access control with middleware validation
+- Token expiration handling
+- Secret key loaded from environment variables
+
+#### Environment Variables Required
+```bash
+# Core secrets (REQUIRED)
+JWT_SECRET_KEY=your-super-secret-key-here-for-development
+POSTGRES_PASSWORD=mindmesh123
+
+# Database URLs (service-specific)
+IDEAS_DATABASE_URL=postgresql://mindmesh:mindmesh123@localhost:5433/mindmesh
+VOTING_DATABASE_URL=postgresql://mindmesh:mindmesh123@localhost:5433/mindmesh
+DECISION_DATABASE_URL=postgresql://mindmesh:mindmesh123@localhost:5433/mindmesh
+REDIS_URL=redis://localhost:6380
+```
+
+### Backend Startup Sequence
+
+#### Development Mode Startup
+```bash
+# 1. Start infrastructure
+docker-compose up -d  # Starts PostgreSQL + Redis
+
+# 2. Set environment variables
+export JWT_SECRET_KEY="your-super-secret-key-here-for-development"
+export POSTGRES_PASSWORD="mindmesh123"
+export IDEAS_DATABASE_URL=postgresql://mindmesh:mindmesh123@localhost:5433/mindmesh
+export VOTING_DATABASE_URL=postgresql://mindmesh:mindmesh123@localhost:5433/mindmesh
+export DECISION_DATABASE_URL=postgresql://mindmesh:mindmesh123@localhost:5433/mindmesh
+export REDIS_URL=redis://localhost:6380
+
+# 3. Start services (in separate terminals)
+python -m uvicorn services.ideas.main:app --host 0.0.0.0 --port 8001
+python -m uvicorn services.voting.main:app --host 0.0.0.0 --port 8002
+python -m uvicorn services.decision.main:app --host 0.0.0.0 --port 8003
+```
+
+#### Health Check Endpoints
+- Ideas: `GET http://localhost:8001/health`
+- Voting: `GET http://localhost:8002/health` 
+- Decision: `GET http://localhost:8003/health`
+
+### Current Backend Status
+
+#### Working Features (Tested)
+- ✅ **Ideas CRUD**: Create, read, update, delete ideas
+- ✅ **Voting System**: Upvote/downvote with aggregation
+- ✅ **Decision Tracking**: Create and manage decisions
+- ✅ **JWT Authentication**: Role-based access control
+- ✅ **Health Monitoring**: Service health endpoints
+- ✅ **Database Integration**: PostgreSQL with proper models
+- ✅ **Redis Caching**: Vote aggregation and rate limiting
+
+#### Foundation Implemented (Not Active)
+- 🏗️ **Analytics Service**: PySpark structure exists but not functional
+- 🏗️ **Event Streaming**: Kafka configs exist but not used
+- 🏗️ **ML Models**: Placeholder code for clustering and prediction
+- 🏗️ **Real-time Features**: WebSocket foundation not implemented
+
+#### Known Issues
+- Decision service tries to connect to analytics service (404 errors)
+- Some vote aggregation edge cases
+- No real-time WebSocket connections yet
+- Analytics service not fully functional
+
+### Test Data Generation
+
+#### JWT Token Generation
+Use `scripts/create_jwt_tokens.py` to generate test tokens:
+```bash
+export JWT_SECRET_KEY="your-super-secret-key-here-for-development"
+python scripts/create_jwt_tokens.py
+```
+
+**Sample Users Available:**
+1. **Alice Johnson** (alice@techcorp.com) - facilitator, admin
+2. **Bob Smith** (bob@techcorp.com) - member  
+3. **Carol Davis** (carol@techcorp.com) - decision_maker
+
+#### API Testing Examples
+```bash
+# Get all ideas
+curl http://localhost:8001/api/v1/ideas/
+
+# Create idea (requires auth)
+curl -X POST http://localhost:8001/api/v1/ideas/ \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"title":"Test Idea","description":"Test description","category":"innovation","tags":["test"]}'
+
+# Vote on idea
+curl -X POST http://localhost:8002/api/v1/votes/ \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"idea_id":1,"vote_type":"upvote"}'
+
+# Create decision (decision_maker role required)
+curl -X POST http://localhost:8003/api/v1/decisions/ \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"idea_id":1,"decision_type":"implementation","summary":"Approved for implementation","rationale":"Strong team support and clear value proposition"}'
+```
+
 ## Backend API Integration
 
 ### Service Endpoints
@@ -218,16 +442,66 @@ mindmesh-frontend/
 
 ## Development Workflow
 
-### Environment Setup
+### NEXT STEPS: Complete Setup Guide
+
+#### Step 1: Create Frontend Repository
 ```bash
-# 1. Create Next.js project
-npx create-next-app@latest mindmesh-frontend --typescript --tailwind --eslint --app
+# 1. Create new repository on GitHub: mindmesh-frontend
+# 2. Clone locally
+cd ~/workspace/github.com/farazalam27/
+git clone https://github.com/farazalam27/mindmesh-frontend.git
+cd mindmesh-frontend/
 
-# 2. Install additional dependencies
-npm install axios zustand @hookform/react-hook-form zod @radix-ui/react-* 
+# 3. Copy this context file
+# (You'll move FRONTEND_CONTEXT.md here manually)
+```
 
-# 3. Set up environment variables
+#### Step 2: Initialize Next.js Project
+```bash
+# Create Next.js project with all recommended settings
+npx create-next-app@latest . --typescript --tailwind --eslint --app --src-dir --import-alias "@/*"
+
+# Install core dependencies
+npm install axios zustand @hookform/react-hook-form zod @radix-ui/react-slot class-variance-authority clsx tailwind-merge lucide-react
+
+# Install UI components (shadcn/ui)
+npx shadcn-ui@latest init
+npx shadcn-ui@latest add button card input label textarea select checkbox radio-group
+
+# Install chart libraries
+npm install recharts chart.js react-chartjs-2
+
+# Install development dependencies
+npm install -D @types/node prettier prettier-plugin-tailwindcss
+```
+
+#### Step 3: Environment Setup
+```bash
+# Create environment file
 cp .env.example .env.local
+# Edit .env.local with actual values
+```
+
+#### Step 4: Initial Project Structure
+```bash
+# Create directory structure
+mkdir -p src/{components/{ui,forms,charts,layout},hooks,lib,services,stores,types,utils}
+mkdir -p src/app/{login,dashboard,ideas,voting,decisions,analytics}
+```
+
+#### Step 5: Start Development
+```bash
+# Start backend services (in mindmesh directory)
+cd ../mindmesh/
+docker-compose up -d
+export JWT_SECRET_KEY="your-super-secret-key-here-for-development"
+export POSTGRES_PASSWORD="mindmesh123"
+# Start each service...
+
+# Start frontend (in mindmesh-frontend directory)
+cd ../mindmesh-frontend/
+npm run dev
+# Visit http://localhost:3000
 ```
 
 ### Environment Variables (.env.local)
